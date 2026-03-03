@@ -16,7 +16,7 @@ from sklearn.inspection import permutation_importance
 from sklearn.decomposition import PCA
 
 # Load dataset
-data = pd.read_csv("/content/seq7264ORFs_dataset.csv")
+data = pd.read_csv("/content/dataset.csv")
 
 # Drop missing values
 data = data.dropna()
@@ -139,7 +139,7 @@ print("EXTRACTING ORIGINAL FEATURES AND SHAP ANALYSIS WITH ORIGINAL NAMES")
 print("="*60)
 
 # Load the original dataset to get feature names
-original_data_path = "/content/Chimp_Table_S8_ List_of_7264ncORFs_along_with_ORBLv_45features.csv"
+original_data_path = "/content/dataset.csv"
 original_data = pd.read_csv(original_data_path)
 
 # Get original feature names (excluding sequence and group columns)
