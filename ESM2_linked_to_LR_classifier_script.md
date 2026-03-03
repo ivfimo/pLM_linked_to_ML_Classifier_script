@@ -97,27 +97,6 @@ y_pred = (y_pred_probs >= 0.5).astype(int)
 print(classification_report(y_test, y_pred, target_names=["Non-Detectable", "Detectable"]))
 
 
-# SHAP Analysis
-explainer = shap.Explainer(best_model, X_train)
-shap_values = explainer(X_test)
-shap.summary_plot(shap_values, X_test)
-
-
-# Permutation Importance
-perm_importance = permutation_importance(best_model, X_test, y_test, scoring='roc_auc', n_repeats=10, random_state=42, n_jobs=-1)
-importance_df = pd.DataFrame({'Feature': X_features.columns.tolist() + [f"emb_{i}" for i in range(X_train_emb.shape[1])], 'Importance': perm_importance.importances_mean})
-importance_df = importance_df.sort_values(by='Importance', ascending=False).head(50)
-
-plt.figure(figsize=(40, 20))
-sns.barplot(x=importance_df['Importance'], y=importance_df['Feature'], palette="viridis")
-plt.xlabel("Mean Importance Score")
-plt.ylabel("Feature")
-plt.title("Top 50 Permutation Importance Features")
-plt.show()
-
-# Visualization
-plt.figure(figsize=(60, 20))
-
 # ROC Curve
 plt.subplot(1, 2, 1)
 fpr, tpr, _ = roc_curve(y_test, y_pred_probs)
@@ -151,4 +130,116 @@ sns.heatmap(conf_matrix, annot=True, fmt="d", cmap="Blues",
 plt.xlabel("Predicted")
 plt.ylabel("Actual")
 plt.title("Confusion Matrix")
+plt.show()
+
+# SHAP Analysis
+
+print("\n" + "="*60)
+print("EXTRACTING ORIGINAL FEATURES AND SHAP ANALYSIS WITH ORIGINAL NAMES")
+print("="*60)
+
+# Load the original dataset to get feature names
+original_data_path = "/content/Chimp_Table_S8_ List_of_7264ncORFs_along_with_ORBLv_45features.csv"
+original_data = pd.read_csv(original_data_path)
+
+# Get original feature names (excluding sequence and group columns)
+original_feature_names = [col for col in original_data.columns if col not in ['sequence', 'group']]
+print(f"\nFound {len(original_feature_names)} original features:")
+print(original_feature_names[:10])  # Print first 10 as sample
+
+# Create a mapping of original feature names to their indices in the combined feature set
+# Note: The combined features are [embeddings + original_features]
+n_embeddings = X_train_emb.shape[1]
+original_feature_indices = list(range(n_embeddings, n_embeddings + len(original_feature_names)))
+
+# Create complete feature names list
+all_feature_names = [f"ESM2_Embedding_{i}" for i in range(n_embeddings)] + original_feature_names
+
+# SHAP analysis using the best logistic regression model
+print("\n" + "="*60)
+print("PERFORMING SHAP ANALYSIS ON LOGISTIC REGRESSION MODEL")
+print("="*60)
+
+# Create SHAP explainer for logistic regression
+explainer_lr = shap.LinearExplainer(best_model, X_train, feature_perturbation="correlation_dependent")
+
+# Calculate SHAP values for test set
+print("Calculating SHAP values for test set...")
+shap_values_lr = explainer_lr.shap_values(X_test)
+
+# Create SHAP summary plot with ALL features (including original names)
+plt.figure(figsize=(16, 10))
+shap.summary_plot(
+    shap_values_lr,
+    X_test,
+    feature_names=all_feature_names,
+    show=False,
+    max_display=30,
+    plot_size=(16, 10)
+)
+plt.title("SHAP Feature Importance - Logistic Regression (All Features)", fontsize=16, fontweight='bold')
+plt.tight_layout()
+plt.savefig("/content/shap_summary_all_features_lr.png", dpi=300, bbox_inches='tight')
+plt.show()
+print("SHAP summary plot saved to /content/shap_summary_all_features_lr.png")
+
+# Create SHAP summary plot with ONLY original features
+print("\n" + "="*60)
+print("CREATING SHAP SUMMARY PLOT WITH ONLY ORIGINAL FEATURES")
+print("="*60)
+
+# Extract SHAP values for original features only
+shap_values_original = shap_values_lr[:, original_feature_indices]
+X_test_original = X_test[:, original_feature_indices]
+
+# Create SHAP summary plot for original features only
+plt.figure(figsize=(14, 10))
+shap.summary_plot(
+    shap_values_original,
+    X_test_original,
+    feature_names=original_feature_names,
+    show=False,
+    max_display=30,
+    plot_size=(14, 10),
+    color=plt.cm.RdBu
+)
+plt.title("SHAP Feature Importance - Original Biological Features Only", fontsize=16, fontweight='bold')
+plt.tight_layout()
+plt.savefig("/content/shap_summary_original_features_only.png", dpi=300, bbox_inches='tight')
+plt.show()
+print("Original features SHAP summary plot saved to /content/shap_summary_original_features_only.png")
+
+# Create a bar plot of SHAP importance for original features
+print("\n" + "="*60)
+print("CREATING SHAP BAR PLOT FOR ORIGINAL FEATURES")
+print("="*60)
+
+# Calculate mean absolute SHAP values for original features
+mean_abs_shap = np.abs(shap_values_original).mean(axis=0)
+
+# Create dataframe for original feature importance
+original_importance_df = pd.DataFrame({
+    'Feature': original_feature_names,
+    'Mean_Abs_SHAP': mean_abs_shap
+}).sort_values('Mean_Abs_SHAP', ascending=False)
+
+# Save to CSV
+original_importance_df.to_csv('/content/original_features_shap_importance.csv', index=False)
+print(f"Original feature importance saved to /content/original_features_shap_importance.csv")
+
+# Plot top 30 original features by SHAP importance
+plt.figure(figsize=(14, 10))
+top_n = min(30, len(original_importance_df))
+top_features = original_importance_df.head(top_n)
+
+# Create horizontal bar plot
+colors = plt.cm.viridis(np.linspace(0, 1, top_n))
+plt.barh(range(top_n), top_features['Mean_Abs_SHAP'].values, color=colors[::-1])
+plt.yticks(range(top_n), top_features['Feature'].values)
+plt.xlabel('Mean |SHAP Value| (Feature Importance)', fontsize=12)
+plt.ylabel('Original Features', fontsize=12)
+plt.title(f'Top {top_n} Original Features by SHAP Importance', fontsize=14, fontweight='bold')
+plt.gca().invert_yaxis()  # Highest importance at top
+plt.tight_layout()
+plt.savefig("/content/original_features_shap_importance_bar.png", dpi=300, bbox_inches='tight')
 plt.show()
