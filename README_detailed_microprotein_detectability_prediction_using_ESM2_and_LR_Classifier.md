@@ -53,7 +53,7 @@ pip install numpy pandas torch transformers tqdm scikit-learn matplotlib seaborn
 ### 9. Visualization
 - The following visualizations are generated:
   - SHAP summary plot.
-  - Permutation importance plot (Top 50 features).
+  - Permutation importance plot (Top features).
   - ROC curve.
   - Precision-Recall curve.
   - Confusion matrix heatmap.
