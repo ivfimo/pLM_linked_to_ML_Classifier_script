@@ -7,4 +7,4 @@
     5. Run the ESM2_linked_to_LR_classifier_script using the 'seq7264ORFs_dataset.csv' file as input ("/content/seq7264ORFs_dataset.csv") and visualize the results
 -      See 'README_Detailed_microprotein_detectability_using_ESM2_and_LR_Classifier.md' for more details on the approach
 -	   See the SHAP and the Permutation Importance Features plots showing the top variables of importance
--      The reader can expect a ROC AUC of 0.72 and PR AUC of 0.70 (depending on the random selection of test/train) 
+-      The reader can expect a ROC AUC of 0.72 and PR AUC of 0.71 (depending on the random selection of test/train) 
