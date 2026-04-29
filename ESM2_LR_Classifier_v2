@@ -15,7 +15,7 @@ Key Innovation: Zero-fit Fisher LDA layer sweep — 63 subsets evaluated in <1 s
 
 Author      : Bioinformatician / ML Specialist
 Date        : 2025
-Repository  : https://github.com/yivfimo/esm2_lr_classifier_v2
+Repository  : https://github.com/ivfimo/pLM_linked_to_ML_Classifier_script/blob/main/ESM2_LR_Classifier_v2
 License     : MIT
 """
 
