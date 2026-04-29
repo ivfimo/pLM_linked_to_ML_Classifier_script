@@ -1,21 +1,21 @@
 # ESM2_LR_Classifier_v2.py
 
-Complete clean script for ESM2-based ORF detectability prediction with ultra-fast layer selection.
+Complete clean script for ESM2-based ORF detectability prediction with multilayer selection.
 
 ```python
 #!/usr/bin/env python3
 """
-ESM2 + Logistic Regression — v6 MULTI-LAYER ULTRA-FAST
+ESM2 + Logistic Regression — v6 MULTI-LAYER 
 =======================================================
 Model   : facebook/esm2_t6_8M_UR50D  (8M, 6 transformer layers)
 Target  : group (1 = Detectable, 0 = Non-Detectable)
-Baseline: v3 AUC = 0.739
+
 
 Key Innovation: Zero-fit Fisher LDA layer sweep — 63 subsets evaluated in <1 second
 
 Author      : Bioinformatician / ML Specialist
 Date        : 2025
-Repository  : https://github.com/yourusername/esm2_lr_classifier_v2
+Repository  : https://github.com/yivfimo/esm2_lr_classifier_v2
 License     : MIT
 """
 
