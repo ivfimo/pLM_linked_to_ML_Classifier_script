@@ -8,7 +8,7 @@
 -      See 'README_Detailed_microprotein_detectability_using_ESM2_and_LR_Classifier.md' for more details on the approach
 -	   See the SHAP and the Permutation Importance Features plots showing the top variables of importance
 -      The reader can expect a ROC AUC of 0.72 and PR AUC of 0.71 (depending on the random selection of test/train)
-# _______________________________________________________________________________________________________________________________--  
+# ____________________________________________________________________________________________________________
 #   Here is a new version of 'ESM2 (pML) linked to LR (Logistic Regression) Classifier model' training for detectability of noncanonical ORF microprotein 
    sequences by Mass Spectrometry, referred as ESM2_LR_Classifier_v2
 # **ESM2_LR_Classifier_v2**
