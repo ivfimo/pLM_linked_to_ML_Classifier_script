@@ -10,12 +10,12 @@
 -      The reader can expect a ROC AUC of 0.72 and PR AUC of 0.71 (depending on the random selection of test/train)
 # _______________________________________________________________________________________________________________________________--  
 #   Here is a new version of 'ESM2 (pML) linked to LR (Logistic Regression) Classifier model' training for detectability of noncanonical ORF microprotein 
-#   sequences by Mass Spectrometry, referred as ESM2_LR_Classifier_v2
+   sequences by Mass Spectrometry, referred as ESM2_LR_Classifier_v2
 # **ESM2_LR_Classifier_v2**
 -   1. Create a Google Colab file https://colab.research.google.com/#create=true (Google Account required)
-    2. Once the file is created, under Notebook settings select T4 GPU as 'Hardware accelerator'
+    2. Once the file is created, under Notebook settings select TPU as 'Hardware accelerator'
     3. Ensure you have the following Python libraries installed !pip install numpy pandas torch transformers tqdm scikit-learn matplotlib seaborn shap
     4. Copy the Python script from the 'ESM2_LR_Classifier_v2.md' file and paste it on your Google Colab file
     5. Run the ESM2_linked_to_LR_classifier_script using the 'seq7097ORFs_dataset.csv' file as input ("/content/seq7097ORFs_dataset.csv") and visualize 
-       the results
+       the results stored in the output folder
     6. The reader can expect a ROC AUC of 0.767 and PR AUC of 0.736 (depending on the random selection of test/train)
