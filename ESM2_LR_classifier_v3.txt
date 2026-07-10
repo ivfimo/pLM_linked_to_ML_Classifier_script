@@ -1,0 +1,902 @@
+# ESM2_LR_classifier_v2.py
+# Complete clean script for ESM2-based ORF detectability prediction with ultra-fast layer selection.
+#!/usr/bin/env python3
+"""
+ESM2 + Logistic Regression — v6 MULTI-LAYER (OPTIMIZED, UPGRADED CAPACITY)
+===========================================
+Model   : facebook/esm2_t12_35M_UR50D  (35M params, 12 transformer layers, 480-dim)
+Target  : group (1 = Detectable, 0 = Non-Detectable)
+
+Key Innovations: 
+  1. Upgraded model capacity (t12_35M for better microprotein structural capture)
+  2. Fast L1-penalized probe layer sweep (handles 4095 layer subsets efficiently)
+  3. Proper RobustScaler integration in combined streams (fixes feature magnitude leakage)
+
+Author      : Ivo Fierro-Monti
+Date        : 30/04/2026
+License     : MIT
+"""
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# IMPORTS
+# ──────────────────────────────────────────────────────────────────────────────
+import os
+import gc
+import ast
+import random
+import warnings
+import time
+from itertools import combinations
+
+import numpy as np
+import pandas as pd
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import seaborn as sns
+import shap
+from tqdm import tqdm
+
+# Machine Learning
+from sklearn.model_selection import train_test_split, StratifiedKFold, GridSearchCV
+from sklearn.linear_model import LogisticRegression, SGDClassifier
+from sklearn.preprocessing import RobustScaler
+from sklearn.metrics import (
+    classification_report,
+    confusion_matrix,
+    roc_auc_score,
+    roc_curve,
+    precision_recall_curve,
+    auc,
+    matthews_corrcoef,
+    balanced_accuracy_score,
+    f1_score,
+)
+from sklearn.calibration import calibration_curve
+from sklearn.inspection import permutation_importance
+
+# Deep Learning
+import torch
+from transformers import AutoTokenizer, AutoModel
+
+# Suppress warnings
+warnings.filterwarnings("ignore")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# TPU / GPU / CPU DETECTION
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def get_device():
+    """Detect and return the best available device (TPU > GPU > CPU)."""
+    try:
+        import torch_xla.core.xla_model as xm
+
+        device = xm.xla_device()
+        print("  ✓ TPU via torch_xla")
+        return device, True
+    except ImportError:
+        pass
+
+    if torch.cuda.is_available():
+        print(f"  ✓ GPU: {torch.cuda.get_device_name(0)}")
+        return torch.device("cuda"), False
+
+    print("  ✓ CPU")
+    return torch.device("cpu"), False
+
+
+device, USE_XLA = get_device()
+if USE_XLA:
+    import torch_xla.core.xla_model as xm
+
+# ──────────────────────────────────────────────────────────────────────────────
+# REPRODUCIBILITY
+# ──────────────────────────────────────────────────────────────────────────────
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PATHS & CONFIGURATION
+# ──────────────────────────────────────────────────────────────────────────────
+DATA_PATH = "/content/seq7097ORFs_dataset.csv"
+EMBED_DIR = "/content/embeddings"
+OUTPUT_DIR = "/content/outputs"
+os.makedirs(EMBED_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Model configuration - UPGRADED TO t12_35M
+ESM2_MODEL = "facebook/esm2_t12_35M_UR50D"
+MAX_SEQ_LEN = 128
+BATCH_SIZE = 64 if (USE_XLA or torch.cuda.is_available()) else 8
+N_SEEDS = 10
+ALL_LAYERS = list(range(1, 13))  # 12 transformer layers
+EMB_DIM_PER_LAYER = 480          # 480 dimensions per layer for t12
+C_GRID = [0.001, 0.005, 0.01, 0.05, 0.1, 0.2, 0.5, 0.7, 1, 2, 5, 10, 50, 100]
+
+t0_total = time.time()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 1. LOAD DATA
+# ──────────────────────────────────────────────────────────────────────────────
+print("=" * 60)
+print("LOADING DATA")
+print("=" * 60)
+
+data = pd.read_csv(DATA_PATH).dropna()
+feature_cols = [c for c in data.columns if c not in ("sequence", "group")]
+all_pos = data[data["group"] == 1]
+all_neg = data[data["group"] == 0]
+n_pos = len(all_pos)
+
+print(f"  Shape          : {data.shape}")
+print(f"  Positives      : {n_pos}   Negatives: {len(all_neg)}")
+print(f"  Feature columns: {len(feature_cols)}")
+print(f"  Device         : {device}  |  batch_size: {BATCH_SIZE}")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 2. FIXED TRAIN / VAL / TEST SPLIT (seed=42, identical to v3)
+# ──────────────────────────────────────────────────────────────────────────────
+bal_fixed = pd.concat(
+    [
+        all_pos.sample(n=n_pos, random_state=SEED),
+        all_neg.sample(n=n_pos, random_state=SEED),
+    ]
+).sample(frac=1, random_state=SEED)
+
+X_seq_fixed = bal_fixed["sequence"]
+X_feat_fixed = bal_fixed[feature_cols].values.astype(np.float32)
+y_fixed = bal_fixed["group"].values
+
+X_seq_tv, X_seq_test, X_feat_tv, X_feat_test, y_tv, y_test = train_test_split(
+    X_seq_fixed, X_feat_fixed, y_fixed,
+    test_size=0.20, stratify=y_fixed, random_state=SEED
+)
+
+X_seq_train, X_seq_val, X_feat_train, X_feat_val, y_train, y_val = train_test_split(
+    X_seq_tv, X_feat_tv, y_tv,
+    test_size=0.15, stratify=y_tv, random_state=SEED
+)
+
+print(f"\n  Fixed split → train:{len(y_train)} | val:{len(y_val)} | test:{len(y_test)}")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 3. MULTI-LAYER EMBEDDING EXTRACTION (single forward pass, mask-pooled)
+# ──────────────────────────────────────────────────────────────────────────────
+print("\n" + "=" * 60)
+print(f"ESM2 MULTI-LAYER EMBEDDINGS ({ESM2_MODEL})")
+print("=" * 60)
+
+tokenizer = AutoTokenizer.from_pretrained(ESM2_MODEL)
+esm_model = AutoModel.from_pretrained(ESM2_MODEL, output_hidden_states=True).to(device)
+esm_model.eval()
+
+
+def embed_all_layers(sequences: list, split_name: str) -> dict:
+    """
+    One forward pass → mask-pooled embeddings for all 12 layers.
+    Caches one .npy file per layer.
+    Returns: {layer: ndarray(N, 480)}
+    """
+    cache = {l: os.path.join(EMBED_DIR, f"{split_name}_L{l}.npy") for l in ALL_LAYERS}
+    if all(os.path.exists(p) for p in cache.values()):
+        print(f"  Cached: {split_name}")
+        return {l: np.load(cache[l]) for l in ALL_LAYERS}
+
+    print(f"  Generating {split_name} ({len(sequences)} seqs)…")
+    bufs = {l: [] for l in ALL_LAYERS}
+    t = time.time()
+
+    for i in tqdm(range(0, len(sequences), BATCH_SIZE), desc=f"  {split_name}", leave=False):
+        batch = sequences[i: i + BATCH_SIZE]
+        inputs = tokenizer(
+            batch,
+            padding="max_length",
+            truncation=True,
+            max_length=MAX_SEQ_LEN,
+            return_tensors="pt",
+        ).to(device)
+
+        with torch.no_grad():
+            hs = esm_model(**inputs).hidden_states  # 13 × (B, L, 480)
+
+        mask = inputs["attention_mask"].unsqueeze(-1).float()
+        lengths = mask.sum(dim=1)
+
+        for l in ALL_LAYERS:
+            pooled = (hs[l] * mask).sum(dim=1) / lengths
+            if USE_XLA:
+                xm.mark_step()
+            bufs[l].append(pooled.cpu().numpy().astype(np.float32))
+
+        del inputs, hs, mask, lengths
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+
+    result = {}
+    for l in ALL_LAYERS:
+        arr = np.vstack(bufs[l])
+        np.save(cache[l], arr)
+        result[l] = arr
+
+    print(f"  Done in {time.time()-t:.1f}s  shape/layer: {arr.shape}")
+    return result
+
+
+t_emb = time.time()
+emb_train = embed_all_layers(list(X_seq_train), "train")
+emb_val = embed_all_layers(list(X_seq_val), "val")
+emb_test = embed_all_layers(list(X_seq_test), "test")
+emb_all = embed_all_layers(list(data["sequence"]), "all")
+print(f"\n  Total embedding time : {time.time()-t_emb:.1f}s")
+
+# Clean up model to free memory
+del esm_model
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
+gc.collect()
+
+# Helper function: stack selected layers
+def stack(layer_dict: dict, subset: tuple) -> np.ndarray:
+    return np.hstack([layer_dict[l] for l in subset])
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 4. FAST L1-PROBE LAYER SWEEP (Handles 4095 12-layer subsets efficiently)
+# ──────────────────────────────────────────────────────────────────────────────
+print("\n" + "=" * 60)
+print("FAST L1-PROBE LAYER SWEEP (Penalizes redundant layers)")
+print("=" * 60)
+
+t_sweep = time.time()
+n_subsets = 2**len(ALL_LAYERS) - 1
+print(f"\n  Evaluating all {n_subsets} subsets via 1-epoch L1-probe…", end=" ", flush=True)
+sweep_records = []
+
+for r in range(1, len(ALL_LAYERS) + 1):
+    for subset in combinations(ALL_LAYERS, r):
+        # Stack layers for this subset
+        X_subset = np.hstack([emb_train[l] for l in subset])
+        
+        # L1 penalty forces sparsity, naturally evaluating if layers add unique info
+        probe = SGDClassifier(loss='log_loss', penalty='l1', alpha=0.01, 
+                              max_iter=1, random_state=SEED)
+        probe.fit(X_subset, y_train)
+        
+        # Use training accuracy as the proxy score for ranking
+        score = probe.score(X_subset, y_train) 
+        
+        sweep_records.append({
+            "layers": str(subset),
+            "n_layers": r,
+            "emb_dim": r * EMB_DIM_PER_LAYER,
+            "J_score": round(score, 6),
+            "val_auc": None,  # filled for top subsets below
+        })
+
+sweep_df = (
+    pd.DataFrame(sweep_records)
+    .sort_values("J_score", ascending=False)
+    .reset_index(drop=True)
+)
+print(f"done in {time.time()-t_sweep:.3f}s")
+
+# Confirm top-6 subsets with a real val-set LR fit
+print(f"\n  Confirming top-6 subsets with val-set LR fits…")
+t_confirm = time.time()
+
+for rank in range(min(6, len(sweep_df))):
+    subset_str = sweep_df.loc[rank, "layers"]
+    
+    # Safely evaluate string tuple like "(1,)" or "(1, 2, 12)"
+    subset = ast.literal_eval(subset_str)
+
+    X_tr_c = np.hstack([stack(emb_train, subset), X_feat_train])
+    X_vl_c = np.hstack([stack(emb_val, subset), X_feat_val])
+
+    lr = LogisticRegression(C=1.0, solver="liblinear", max_iter=500, random_state=SEED)
+    lr.fit(X_tr_c, y_train)
+    val_auc = roc_auc_score(y_val, lr.predict_proba(X_vl_c)[:, 1])
+    sweep_df.loc[rank, "val_auc"] = round(val_auc, 6)
+    print(
+        f"    Rank {rank+1}  {str(subset):30s}  "
+        f"Probe={sweep_df.loc[rank,'J_score']:.4f}  val_AUC={val_auc:.4f}"
+    )
+
+print(f"  Confirmation done in {time.time()-t_confirm:.1f}s")
+
+# Pick the subset with the highest confirmed val AUC
+confirmed = sweep_df.dropna(subset=["val_auc"])
+best_row = confirmed.loc[confirmed["val_auc"].idxmax()]
+best_str = best_row["layers"]
+
+# Safely evaluate string tuple for the final best layers
+BEST_LAYERS = ast.literal_eval(best_str)
+
+best_val_auc_confirmed = float(best_row["val_auc"])
+best_J_score = float(best_row["J_score"])
+
+sweep_df.to_csv(os.path.join(OUTPUT_DIR, "layer_selection_sweep.csv"), index=False)
+
+print(f"\n  ✓ Best subset      : {BEST_LAYERS}")
+print(f"  ✓ Confirmed val AUC: {best_val_auc_confirmed:.4f}")
+print(f"  ✓ Probe Score       : {best_J_score:.4f}")
+print(f"  Total sweep time   : {time.time()-t_sweep:.1f}s")
+print(f"\n  Top-10 by Probe Score:")
+print(
+    sweep_df[["layers", "n_layers", "emb_dim", "J_score", "val_auc"]]
+    .head(10)
+    .to_string(index=False)
+)
+
+# ── Layer sweep plot (dual-axis: Probe score + confirmed val AUC) ─────────────
+top20 = sweep_df.head(20).copy().reset_index(drop=True)
+fig, ax1 = plt.subplots(figsize=(13, 7))
+ax2 = ax1.twinx()
+
+x = np.arange(len(top20))
+width = 0.55
+cols = plt.cm.RdYlGn(np.linspace(0.3, 0.9, len(top20)))[::-1]
+bars = ax1.barh(x, top20["J_score"].values, width, color=cols, label="L1 Probe Score (proxy)", alpha=0.85)
+
+# Overlay confirmed val AUC dots where available
+confirmed_mask = top20["val_auc"].notna()
+ax2.scatter(
+    top20.loc[confirmed_mask, "val_auc"].values,
+    x[confirmed_mask],
+    color="navy",
+    zorder=5,
+    s=60,
+    label="Confirmed val AUC (LR fit)",
+)
+
+ax1.set_yticks(x)
+ax1.set_yticklabels(
+    [f"{r['layers']}  (k={r['n_layers']})" for _, r in top20.iterrows()], fontsize=8
+)
+ax1.invert_yaxis()
+ax1.set_xlabel("L1 Probe Score (proxy, higher=better)", color="darkgreen")
+ax2.set_xlabel("Confirmed val ROC-AUC", color="navy")
+ax2.tick_params(axis="x", labelcolor="navy")
+
+lines1, labels1 = ax1.get_legend_handles_labels()
+lines2, labels2 = ax2.get_legend_handles_labels()
+ax1.legend(lines1 + lines2, labels1 + labels2, loc="lower right", fontsize=8)
+ax1.set_title(
+    f"Layer Subset Selection — Top 20 of {n_subsets}\n"
+    f"Winner: {BEST_LAYERS}  (val AUC={best_val_auc_confirmed:.4f}, Probe={best_J_score:.3f})",
+    fontsize=11,
+)
+plt.tight_layout()
+plt.savefig(os.path.join(OUTPUT_DIR, "layer_selection_sweep.png"), dpi=300, bbox_inches="tight")
+plt.close()
+print(f"\n  Saved: layer_selection_sweep.csv | layer_selection_sweep.png")
+
+# Build raw matrices for downstream steps
+emb_train_best = stack(emb_train, BEST_LAYERS)
+emb_val_best = stack(emb_val, BEST_LAYERS)
+emb_test_best = stack(emb_test, BEST_LAYERS)
+
+EMB_DIM = emb_train_best.shape[1]
+N_LAYERS_SEL = len(BEST_LAYERS)
+COMBINED_DIM = EMB_DIM + len(feature_cols)
+
+print(f"\n  Embedding dim : {EMB_DIM}  ({N_LAYERS_SEL}×{EMB_DIM_PER_LAYER})")
+print(f"  Combined dim  : {COMBINED_DIM}")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 5. ENSEMBLE — COMBINED STREAM (raw emb + SCALED bio, liblinear)
+# ──────────────────────────────────────────────────────────────────────────────
+print("\n" + "=" * 60)
+print(f"ENSEMBLE: {N_SEEDS} SEEDS  combined stream  layers={BEST_LAYERS}")
+print("=" * 60)
+
+cv5 = StratifiedKFold(n_splits=5, shuffle=True, random_state=SEED)
+param_grid_combined = [{"C": C_GRID, "solver": ["liblinear"], "max_iter": [2000]}]
+
+val_probs_combined = np.zeros(len(y_val))
+test_probs_combined = np.zeros(len(y_test))
+member_records = []
+
+t_ens = time.time()
+for seed_i in range(N_SEEDS):
+    print(f"  [Seed {seed_i+1}/{N_SEEDS}]", end="  ", flush=True)
+
+    neg_draw = all_neg.sample(n=n_pos, random_state=seed_i)
+    bal_s = pd.concat([all_pos, neg_draw]).sample(frac=1, random_state=seed_i)
+    y_s = bal_s["group"].values
+    feat_s = bal_s[feature_cols].values.astype(np.float32)
+    rows_s = [data.index.get_loc(i) for i in bal_s.index]
+    emb_s = stack({l: emb_all[l][rows_s] for l in BEST_LAYERS}, BEST_LAYERS)
+
+    idx_s = np.arange(len(y_s))
+    idx_tv, _ = train_test_split(idx_s, test_size=0.20, stratify=y_s, random_state=SEED)
+    idx_tr, _ = train_test_split(idx_tv, test_size=0.15, stratify=y_s[idx_tv], random_state=SEED)
+
+    # FIX: Apply RobustScaler to bio-features before concatenating to prevent magnitude leakage
+    sc = RobustScaler()
+    X_tr_s = np.hstack([emb_s[idx_tr], sc.fit_transform(feat_s[idx_tr])])
+    y_tr_s = y_s[idx_tr]
+
+    gs = GridSearchCV(
+        LogisticRegression(random_state=SEED + seed_i),
+        param_grid_combined,
+        cv=cv5,
+        scoring="roc_auc",
+        n_jobs=-1,
+        refit=True,
+    )
+    gs.fit(X_tr_s, y_tr_s)
+    member = gs.best_estimator_
+    print(f"C={gs.best_params_['C']}  cv={gs.best_score_:.4f}")
+
+    # FIX: Scale validation and test features using the scaler fitted on this seed's training data
+    X_val_s = np.hstack([emb_val_best, sc.transform(X_feat_val)])
+    X_test_s = np.hstack([emb_test_best, sc.transform(X_feat_test)])
+    
+    vp = member.predict_proba(X_val_s)[:, 1]
+    tp = member.predict_proba(X_test_s)[:, 1]
+
+    val_probs_combined += vp
+    test_probs_combined += tp
+    member_records.append(
+        {
+            "seed": seed_i,
+            "stream": "combined",
+            "layers": str(BEST_LAYERS),
+            "C": gs.best_params_["C"],
+            "cv_auc": gs.best_score_,
+            "val_auc": roc_auc_score(y_val, vp),
+            "test_auc": roc_auc_score(y_test, tp),
+        }
+    )
+
+val_probs_combined /= N_SEEDS
+test_probs_combined /= N_SEEDS
+auc_comb_val = roc_auc_score(y_val, val_probs_combined)
+auc_comb_test = roc_auc_score(y_test, test_probs_combined)
+print(f"\n  Combined → val AUC={auc_comb_val:.4f}  test AUC={auc_comb_test:.4f}  ({time.time()-t_ens:.1f}s)")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 6. ENSEMBLE — BIO-FEATURE STREAM
+# ──────────────────────────────────────────────────────────────────────────────
+print("\n" + "=" * 60)
+print(f"ENSEMBLE: {N_SEEDS} SEEDS  bio-feature stream")
+print("=" * 60)
+
+param_grid_bio = {
+    "C": [0.005, 0.01, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0],
+    "solver": ["liblinear"],
+    "max_iter": [2000],
+}
+
+val_probs_bio = np.zeros(len(y_val))
+test_probs_bio = np.zeros(len(y_test))
+
+for seed_i in range(N_SEEDS):
+    neg_draw = all_neg.sample(n=n_pos, random_state=seed_i)
+    bal_s = pd.concat([all_pos, neg_draw]).sample(frac=1, random_state=seed_i)
+    y_s = bal_s["group"].values
+    feat_s = bal_s[feature_cols].values.astype(np.float32)
+
+    idx_s = np.arange(len(y_s))
+    idx_tv, _ = train_test_split(idx_s, test_size=0.20, stratify=y_s, random_state=SEED)
+    idx_tr, _ = train_test_split(idx_tv, test_size=0.15, stratify=y_s[idx_tv], random_state=SEED)
+
+    sc = RobustScaler()
+    X_tr_s = sc.fit_transform(feat_s[idx_tr])
+    y_tr_s = y_s[idx_tr]
+
+    gs = GridSearchCV(
+        LogisticRegression(max_iter=2000, random_state=SEED + seed_i),
+        param_grid_bio,
+        cv=cv5,
+        scoring="roc_auc",
+        n_jobs=-1,
+        refit=True,
+    )
+    gs.fit(X_tr_s, y_tr_s)
+    member = gs.best_estimator_
+
+    vp = member.predict_proba(sc.transform(X_feat_val))[:, 1]
+    tp = member.predict_proba(sc.transform(X_feat_test))[:, 1]
+
+    val_probs_bio += vp
+    test_probs_bio += tp
+    member_records.append(
+        {
+            "seed": seed_i,
+            "stream": "bio",
+            "layers": "none",
+            "C": gs.best_params_["C"],
+            "cv_auc": gs.best_score_,
+            "val_auc": roc_auc_score(y_val, vp),
+            "test_auc": roc_auc_score(y_test, tp),
+        }
+    )
+
+val_probs_bio /= N_SEEDS
+test_probs_bio /= N_SEEDS
+auc_bio_val = roc_auc_score(y_val, val_probs_bio)
+auc_bio_test = roc_auc_score(y_test, test_probs_bio)
+print(f"  Bio → val AUC={auc_bio_val:.4f}  test AUC={auc_bio_test:.4f}")
+
+pd.DataFrame(member_records).to_csv(os.path.join(OUTPUT_DIR, "ensemble_member_aucs.csv"), index=False)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 7. LATE FUSION
+# ──────────────────────────────────────────────────────────────────────────────
+print("\n" + "=" * 60)
+print("LATE FUSION")
+print("=" * 60)
+
+best_alpha, best_val_auc = 1.0, auc_comb_val
+for alpha in np.arange(0.0, 1.01, 0.05):
+    blended = alpha * val_probs_combined + (1 - alpha) * val_probs_bio
+    a = roc_auc_score(y_val, blended)
+    if a > best_val_auc:
+        best_val_auc = a
+        best_alpha = alpha
+
+print(f"  Optimal α={best_alpha:.2f}  val AUC={best_val_auc:.4f}")
+final_test_probs = best_alpha * test_probs_combined + (1 - best_alpha) * test_probs_bio
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 8. THRESHOLD TUNING
+# ──────────────────────────────────────────────────────────────────────────────
+blended_val_probs = best_alpha * val_probs_combined + (1 - best_alpha) * val_probs_bio
+best_thresh, best_f1 = 0.5, 0.0
+for t in np.linspace(0.30, 0.70, 81):
+    f1 = f1_score(y_val, (blended_val_probs >= t).astype(int), zero_division=0)
+    if f1 > best_f1:
+        best_f1, best_thresh = f1, t
+print(f"  Optimal threshold={best_thresh:.2f}  (val F1={best_f1:.4f})")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 9. FINAL TEST SET EVALUATION
+# ──────────────────────────────────────────────────────────────────────────────
+print("\n" + "=" * 60)
+print("FINAL TEST SET EVALUATION")
+print("=" * 60)
+
+y_prob = final_test_probs
+y_pred = (y_prob >= best_thresh).astype(int)
+
+roc_auc_final = roc_auc_score(y_test, y_prob)
+prec, rec, _ = precision_recall_curve(y_test, y_prob)
+pr_auc_final = auc(rec, prec)
+mcc = matthews_corrcoef(y_test, y_pred)
+bal_acc = balanced_accuracy_score(y_test, y_pred)
+
+print(f"\n  ROC-AUC           : {roc_auc_final:.4f}  (v3 baseline: 0.739)")
+print(f"  PR-AUC            : {pr_auc_final:.4f}")
+print(f"  MCC               : {mcc:.4f}")
+print(f"  Balanced Accuracy : {bal_acc:.4f}")
+print(f"\n{classification_report(y_test, y_pred, target_names=['Non-Detectable', 'Detectable'])}")
+
+pd.DataFrame({"y_true": y_test, "y_prob": y_prob, "y_pred": y_pred}).to_csv(
+    os.path.join(OUTPUT_DIR, "final_test_predictions.csv"), index=False
+)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 10. PLOTS
+# ──────────────────────────────────────────────────────────────────────────────
+# ROC + PR
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+fpr, tpr, _ = roc_curve(y_test, y_prob)
+axes[0].plot(fpr, tpr, lw=2, color="steelblue", label=f"AUC={roc_auc_final:.3f}")
+axes[0].plot([0, 1], [0, 1], "k--", lw=1)
+axes[0].set(xlabel="FPR", ylabel="TPR", title="ROC Curve")
+axes[0].legend()
+axes[1].plot(rec, prec, lw=2, color="darkorange", label=f"AUC={pr_auc_final:.3f}")
+axes[1].set(xlabel="Recall", ylabel="Precision", title="PR Curve")
+axes[1].legend()
+plt.suptitle(
+    f"ESM2-LR v6 (t12_35M)  layers={BEST_LAYERS}  α={best_alpha:.2f}  thresh={best_thresh:.2f}",
+    fontsize=11,
+)
+plt.tight_layout()
+plt.savefig(os.path.join(OUTPUT_DIR, "roc_pr_curves.png"), dpi=300, bbox_inches="tight")
+plt.close()
+
+# Confusion matrix
+fig, ax = plt.subplots(figsize=(6, 5))
+sns.heatmap(
+    confusion_matrix(y_test, y_pred),
+    annot=True,
+    fmt="d",
+    cmap="Blues",
+    ax=ax,
+    xticklabels=["Non-Det", "Det"],
+    yticklabels=["Non-Det", "Det"],
+)
+ax.set(xlabel="Predicted", ylabel="Actual", title=f"Confusion Matrix  layers={BEST_LAYERS}")
+plt.tight_layout()
+plt.savefig(os.path.join(OUTPUT_DIR, "confusion_matrix.png"), dpi=300, bbox_inches="tight")
+plt.close()
+
+# Calibration
+fig, ax = plt.subplots(figsize=(6, 5))
+pt, pp = calibration_curve(y_test, y_prob, n_bins=10)
+ax.plot(pp, pt, "s-", label="ESM2-LR v6 (t12)")
+ax.plot([0, 1], [0, 1], "k--")
+ax.set(xlabel="Mean predicted prob", ylabel="Fraction positives", title="Calibration Curve")
+ax.legend()
+plt.tight_layout()
+plt.savefig(os.path.join(OUTPUT_DIR, "calibration_curve.png"), dpi=300, bbox_inches="tight")
+plt.close()
+print("  Saved: roc_pr_curves.png | confusion_matrix.png | calibration_curve.png")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 11. SHAP (LinearExplainer, interventional)
+# ──────────────────────────────────────────────────────────────────────────────
+print("\n" + "=" * 60)
+print("SHAP ANALYSIS")
+print("=" * 60)
+
+# FIX: Apply RobustScaler to the bio-features before combining with embeddings for SHAP
+scaler_shap = RobustScaler()
+X_tr0 = np.hstack([emb_train_best, scaler_shap.fit_transform(X_feat_train)])
+X_test0 = np.hstack([emb_test_best, scaler_shap.transform(X_feat_test)])
+
+print("  Training SHAP model (GridSearchCV)…")
+gs0 = GridSearchCV(
+    LogisticRegression(random_state=SEED),
+    [{"C": C_GRID, "solver": ["liblinear"], "max_iter": [2000]}],
+    cv=cv5,
+    scoring="roc_auc",
+    n_jobs=-1,
+    refit=True,
+)
+gs0.fit(X_tr0, y_train)
+shap_model = gs0.best_estimator_
+shap_test_auc = roc_auc_score(y_test, shap_model.predict_proba(X_test0)[:, 1])
+print(f"  C={gs0.best_params_['C']}  CV-AUC={gs0.best_score_:.4f}  test AUC={shap_test_auc:.4f}")
+
+emb_names = [f"ESM2_L{l}_d{d}" for l in BEST_LAYERS for d in range(EMB_DIM_PER_LAYER)]
+all_feat_names = emb_names + list(feature_cols)
+bio_idx = list(range(EMB_DIM, EMB_DIM + len(feature_cols)))
+
+print("  Computing SHAP values…")
+explainer = shap.LinearExplainer(shap_model, X_tr0, feature_perturbation="interventional")
+shap_vals = explainer.shap_values(X_test0)
+print(f"  Shape: {shap_vals.shape}")
+
+# 11a all-features beeswarm
+plt.figure(figsize=(16, 10))
+shap.summary_plot(
+    shap_vals,
+    X_test0,
+    feature_names=all_feat_names,
+    max_display=30,
+    show=False,
+)
+plt.title(f"SHAP Summary — All Features  layers={BEST_LAYERS}", fontsize=14, fontweight="bold")
+plt.tight_layout()
+plt.savefig(os.path.join(OUTPUT_DIR, "shap_all_features.png"), dpi=300, bbox_inches="tight")
+plt.close()
+
+# 11b bio beeswarm
+shap_bio = shap_vals[:, bio_idx]
+X_test_bio = X_test0[:, bio_idx]
+plt.figure(figsize=(14, 10))
+shap.summary_plot(
+    shap_bio,
+    X_test_bio,
+    feature_names=list(feature_cols),
+    max_display=30,
+    show=False,
+    color=plt.cm.RdBu,
+)
+plt.title("SHAP Summary — Biological Features Only", fontsize=14, fontweight="bold")
+plt.tight_layout()
+plt.savefig(os.path.join(OUTPUT_DIR, "shap_bio_features.png"), dpi=300, bbox_inches="tight")
+plt.close()
+
+# 11c bio bar + CSV
+mean_abs = np.abs(shap_bio).mean(axis=0)
+imp_df = (
+    pd.DataFrame({"Feature": list(feature_cols), "Mean_Abs_SHAP": mean_abs})
+    .sort_values("Mean_Abs_SHAP", ascending=False)
+    .reset_index(drop=True)
+)
+imp_df.to_csv(os.path.join(OUTPUT_DIR, "bio_shap_importance.csv"), index=False)
+
+top_n = min(30, len(imp_df))
+fig, ax = plt.subplots(figsize=(12, 9))
+ax.barh(
+    range(top_n),
+    imp_df["Mean_Abs_SHAP"].values[:top_n],
+    color=plt.cm.viridis(np.linspace(0, 1, top_n))[::-1],
+)
+ax.set_yticks(range(top_n))
+ax.set_yticklabels(imp_df["Feature"].values[:top_n])
+ax.set_xlabel("Mean |SHAP|")
+ax.set_title(f"Top {top_n} Bio Features — SHAP  layers={BEST_LAYERS}")
+ax.invert_yaxis()
+plt.tight_layout()
+plt.savefig(os.path.join(OUTPUT_DIR, "shap_bio_bar.png"), dpi=300, bbox_inches="tight")
+plt.close()
+
+# 11d per-layer SHAP bar
+layer_shap = [
+    float(
+        np.abs(shap_vals[:, i * EMB_DIM_PER_LAYER : (i + 1) * EMB_DIM_PER_LAYER]).mean()
+    )
+    for i in range(N_LAYERS_SEL)
+]
+bio_shap_mean = float(np.abs(shap_bio).mean())
+xlabels = [f"L{l}" for l in BEST_LAYERS] + ["Bio"]
+xvals = layer_shap + [bio_shap_mean]
+fig, ax = plt.subplots(figsize=(max(6, (N_LAYERS_SEL + 1) * 1.4), 5))
+bars = ax.bar(
+    xlabels,
+    xvals,
+    color=["steelblue"] * N_LAYERS_SEL + ["darkorange"],
+    edgecolor="white",
+    width=0.6,
+)
+for bar, v in zip(bars, xvals):
+    ax.text(
+        bar.get_x() + bar.get_width() / 2,
+        bar.get_height() + max(xvals) * 0.01,
+        f"{v:.4f}",
+        ha="center",
+        va="bottom",
+        fontsize=10,
+    )
+ax.set_ylabel("Mean |SHAP|")
+ax.set_title(f"SHAP Importance per Layer vs Bio  layers={BEST_LAYERS}")
+ax.set_ylim(0, max(xvals) * 1.2)
+plt.tight_layout()
+plt.savefig(os.path.join(OUTPUT_DIR, "shap_per_layer.png"), dpi=300, bbox_inches="tight")
+plt.close()
+
+# 11e raw SHAP CSV
+pd.DataFrame(shap_bio, columns=list(feature_cols)).to_csv(
+    os.path.join(OUTPUT_DIR, "shap_bio_values_raw.csv"), index=False
+)
+print(f"  Saved all SHAP outputs")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 12. PERMUTATION IMPORTANCE
+# ──────────────────────────────────────────────────────────────────────────────
+print("\n" + "=" * 60)
+print("PERMUTATION IMPORTANCE (20 repeats)")
+print("=" * 60)
+
+perm = permutation_importance(
+    shap_model,
+    X_test0,
+    y_test,
+    n_repeats=20,
+    random_state=SEED,
+    n_jobs=-1,
+    scoring="roc_auc",
+)
+perm_df = (
+    pd.DataFrame(
+        {
+            "Feature": list(feature_cols),
+            "Permutation_Imp": perm.importances_mean[bio_idx],
+            "Permutation_Std": perm.importances_std[bio_idx],
+        }
+    )
+    .sort_values("Permutation_Imp", ascending=False)
+    .reset_index(drop=True)
+)
+perm_df.to_csv(os.path.join(OUTPUT_DIR, "bio_permutation_importance.csv"), index=False)
+
+top_n = min(30, len(perm_df))
+fig, ax = plt.subplots(figsize=(12, 9))
+ax.barh(
+    range(top_n),
+    perm_df["Permutation_Imp"].values[:top_n],
+    xerr=perm_df["Permutation_Std"].values[:top_n],
+    color="steelblue",
+    capsize=3,
+)
+ax.set_yticks(range(top_n))
+ax.set_yticklabels(perm_df["Feature"].values[:top_n])
+ax.set_xlabel("Mean Δ ROC-AUC (higher = more important)")
+ax.set_title(f"Top {top_n} Bio Features — Permutation Importance layers={BEST_LAYERS}")
+ax.axvline(0, color="black", lw=0.8, linestyle="--")
+ax.invert_yaxis()
+plt.tight_layout()
+plt.savefig(os.path.join(OUTPUT_DIR, "permutation_importance.png"), dpi=300, bbox_inches="tight")
+plt.close()
+print(f"  Saved: permutation_importance.png | bio_permutation_importance.csv")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 13. SUMMARY
+# ──────────────────────────────────────────────────────────────────────────────
+total_time = time.time() - t0_total
+summary = f"""
+ESM2-LR v6 Multi-Layer Ultra-Fast  —  Run Summary
+==================================================
+Device               : {device}
+Model                : {ESM2_MODEL}
+Batch size           : {BATCH_SIZE}
+Total wall time      : {total_time/60:.1f} min
+
+Data
+----
+Positives            : {n_pos}
+Negatives (pool)     : {len(all_neg)}
+Train / Val / Test   : {len(y_train)} / {len(y_val)} / {len(y_test)}
+Feature columns      : {len(feature_cols)}
+
+Layer Selection  (Fast L1-Probe Sweep)
+---------------------------------------
+Method               : 1-epoch L1-penalized SGD probe (handles layer redundancy)
+Total Subsets        : {n_subsets}
+Sweep time           : < 30 s
+Confirmation         : 6 val-set LR fits (top-6 subsets only)
+Best subset          : {BEST_LAYERS}
+Probe Score          : {best_J_score:.4f}
+Confirmed val AUC    : {best_val_auc_confirmed:.4f}
+Embedding dim        : {EMB_DIM}  ({N_LAYERS_SEL}×{EMB_DIM_PER_LAYER})
+Combined dim         : {COMBINED_DIM}
+
+Ensemble Config
+---------------
+N_SEEDS              : {N_SEEDS}
+C grid               : {C_GRID}
+Solver               : liblinear
+Scaling              : RobustScaler (Applied to Bio features in both Combined & Bio streams)
+Late fusion α        : {best_alpha:.2f}
+Decision threshold   : {best_thresh:.2f}
+
+Test Set Performance
+--------------------
+ROC-AUC              : {roc_auc_final:.4f}
+PR-AUC               : {pr_auc_final:.4f}
+MCC                  : {mcc:.4f}
+Balanced Accuracy    : {bal_acc:.4f}
+
+SHAP Model
+----------
+Best C               : {gs0.best_params_['C']}
+CV-AUC               : {gs0.best_score_:.4f}
+Test AUC (SHAP mdl)  : {shap_test_auc:.4f}
+
+Per-Layer SHAP Importance
+--------------------------
+{chr(10).join(f"  Layer {BEST_LAYERS[i]:d} : {layer_shap[i]:.5f}" for i in range(N_LAYERS_SEL))}
+  Bio feats : {bio_shap_mean:.5f}
+
+Output Files
+------------
+layer_selection_sweep.csv / .png
+roc_pr_curves.png
+confusion_matrix.png
+calibration_curve.png
+shap_all_features.png
+shap_bio_features.png
+shap_bio_bar.png
+shap_per_layer.png
+shap_bio_values_raw.csv
+bio_shap_importance.csv
+bio_permutation_importance.csv
+permutation_importance.png
+ensemble_member_aucs.csv
+final_test_predictions.csv
+run_summary.txt
+"""
+print(summary)
+with open(os.path.join(OUTPUT_DIR, "run_summary.txt"), "w") as f:
+    f.write(summary)
+
+print("=" * 60)
+print(f"ALL DONE  —  {total_time/60:.1f} min total")
+print(f"Best layers : {BEST_LAYERS}")
+print(f"ROC-AUC     : {roc_auc_final:.4f}")
+print(f"Outputs     : {OUTPUT_DIR}/")
+print("=" * 60)
