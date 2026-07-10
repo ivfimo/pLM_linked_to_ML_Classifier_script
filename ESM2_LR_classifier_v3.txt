@@ -1,4 +1,4 @@
-# ESM2_LR_classifier_v2.py
+# ESM2_LR_classifier_v3.py
 # Complete clean script for ESM2-based ORF detectability prediction with ultra-fast layer selection.
 #!/usr/bin/env python3
 """
