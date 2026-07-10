@@ -9,8 +9,7 @@
 -	   See the SHAP and the Permutation Importance Features plots showing the top variables of importance
 -      The reader can expect a ROC AUC of 0.72 and PR AUC of 0.71 (depending on the random selection of test/train)
 # ____________________________________________________________________________________________________________
-#   Here is a new version of 'ESM2 (pML) linked to LR (Logistic Regression) Classifier model' training for detectability of noncanonical ORF microprotein 
-   sequences by Mass Spectrometry, referred as ESM2_LR_Classifier_v2
+#   Here is a new version (V2) of 'ESM2 (pML) linked to LR (Logistic Regression) Classifier model' training for detectability of noncanonical ORF microprotein sequences by Mass Spectrometry, referred as ESM2_LR_Classifier_v2
 # **ESM2_LR_Classifier_v2**
 -   1. Create a Google Colab file https://colab.research.google.com/#create=true (Google Account required)
     2. Once the file is created, under Notebook settings select TPU as 'Hardware accelerator'
@@ -19,3 +18,13 @@
     5. Run the ESM2_linked_to_LR_classifier_script using the 'seq7097ORFs_dataset.csv' file as input ("/content/seq7097ORFs_dataset.csv") and visualize 
        the results stored in the output folder
     6. The reader can expect a ROC AUC of 0.767 and PR AUC of 0.736 (depending on the random selection of test/train)
+ ____________________________________________________________________________________________________________
+Here is an updated version (V3) of 'ESM2 (pML) linked to LR (Logistic Regression) Classifier model' training for detectability of noncanonical ORF microprotein sequences by Mass Spectrometry, referred as ESM2_LR_Classifier_v3
+ 
+ESM2_LR_Classifier_v2
+Create a Google Colab file https://colab.research.google.com/#create=true (Google Account required)
+Once the file is created, under Notebook settings select TPU as 'Hardware accelerator'
+Ensure you have the following Python libraries installed !pip install numpy pandas torch transformers tqdm scikit-learn matplotlib seaborn shap
+Copy the Python script from the 'ESM2_LR_Classifier_v3.txt' file and paste it on your Google Colab file
+Run the ESM2_linked_to_LR_classifier_script using the 'seq7097ORFs_dataset.csv' file as input ("/content/seq7097ORFs_dataset.csv") and visualize the results stored in the output folder
+The reader can expect a ROC AUC of 0.767 and PR AUC of 0.736 (depending on the random selection of test/train)
