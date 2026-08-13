@@ -29,4 +29,4 @@
     4. Copy the Python script from the 'ESM2_LR_Classifier_v3.md' file and paste it on your Google Colab file
     5. Run the ESM2_linked_to_LR_classifier_script using the 'seq7097ORF_dataset.csv' file as input ("/content/seq7097ORFs_dataset.csv") and visualize 
        the results stored in the output folder
-    6. The reader can expect a ROC AUC of 0.775 and PR AUC of 0.736 (depending on the random selection of test/train)
+    6. The reader can expect a ROC AUC of 0.78 and PR AUC of 0.748 (depending on the random selection of test/train)
