@@ -1,8 +1,48 @@
-# ESM2_LR_classifier_v3.py
-# Complete clean script for ESM2-based ORF detectability prediction with ultra-fast layer selection.
+# ESM2-LR Classifier for ORF Detectability
+
+**Version:** v6 Multi-Layer (Optimised, Upgraded Capacity)  
+**Author:** Ivo Fierro-Monti  
+**Date:** 30/04/2026  
+**License:** MIT
+
+## Overview
+
+This repository contains a complete Python pipeline for predicting ORF (Open Reading Frame) detectability using ESM2 protein language model embeddings and a logistic regression classifier. The model is built on top of `facebook/esm2_t12_35M_UR50D` (35M parameters, 12 transformer layers, 480‑dim embeddings) and incorporates:
+
+- **Ultra-fast layer selection** – exhaustive search over all 2¹²−1 layer subsets using a 1‑epoch L1‑penalised probe.
+- **Multi-stream ensemble** – combined embedding + biological features with RobustScaler to prevent magnitude leakage.
+- **Late fusion** – blending predictions from combined and bio‑only streams.
+- **Comprehensive evaluation** – ROC‑AUC, PR‑AUC, MCC, calibration curves, and SHAP/permutation importance.
+
+The pipeline is designed for Google Colab (default paths) but can be adapted to local environments.
+
+---
+
+## Installation
+
+### Requirements
+
+- Python 3.8+
+- PyTorch
+- Transformers (Hugging Face)
+- scikit‑learn
+- pandas, numpy, matplotlib, seaborn
+- shap
+- tqdm
+
+Install the dependencies:
+
+```bash
+pip install torch transformers scikit-learn pandas numpy matplotlib seaborn shap tqdm
+
+python ESM2_LR_classifier_v3.py
+
+Script
+Below is the full Python script. You can copy it directly into a .py file or run it in a Colab notebook.
+
 #!/usr/bin/env python3
 """
-ESM2 + Logistic Regression — v6 MULTI-LAYER (OPTIMIZED, UPGRADED CAPACITY)
+ESM2 + Logistic Regression — v6 MULTI-LAYER (OPTIMISED, UPGRADED CAPACITY)
 ===========================================
 Model   : facebook/esm2_t12_35M_UR50D  (35M params, 12 transformer layers, 480-dim)
 Target  : group (1 = Detectable, 0 = Non-Detectable)
@@ -105,7 +145,7 @@ if torch.cuda.is_available():
 # ──────────────────────────────────────────────────────────────────────────────
 # PATHS & CONFIGURATION
 # ──────────────────────────────────────────────────────────────────────────────
-DATA_PATH = "/content/seq7097ORFs_dataset.csv"
+DATA_PATH = "/content/seq7097ORFs_dataset2.csv"
 EMBED_DIR = "/content/embeddings"
 OUTPUT_DIR = "/content/outputs"
 os.makedirs(EMBED_DIR, exist_ok=True)
