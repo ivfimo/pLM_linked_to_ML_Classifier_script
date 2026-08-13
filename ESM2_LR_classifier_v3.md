@@ -153,7 +153,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # Model configuration - UPGRADED TO t12_35M
 ESM2_MODEL = "facebook/esm2_t12_35M_UR50D"
-MAX_SEQ_LEN = 128
+MAX_SEQ_LEN = 150
 BATCH_SIZE = 64 if (USE_XLA or torch.cuda.is_available()) else 8
 N_SEEDS = 10
 ALL_LAYERS = list(range(1, 13))  # 12 transformer layers
