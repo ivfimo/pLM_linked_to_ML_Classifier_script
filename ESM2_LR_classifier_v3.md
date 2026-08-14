@@ -1,4 +1,4 @@
-# ESM2-LR Classifier for ORF Detectability
+# ESM2-LR Classifier for non canonical ORF Detectability
 
 **Version:** v6 Multi-Layer (Optimised, Upgraded Capacity)  
 **Author:** Ivo Fierro-Monti  
